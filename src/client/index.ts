@@ -1,7 +1,8 @@
 /**
  * dsh-notify-bark browser half — registers the "Bark 通知" settings section
- * and talks to the Host exclusively through the /dsh-notify-bark loopback RPC
- * (the Bark endpoint is a secret and never crosses the wire).
+ * and talks to the Host exclusively through the barkNotify Typert Remote
+ * namespace on the shared /api channel (the Bark URL is a secret and only
+ * travels browser → Host, on a set call).
  *
  * NOTE: the shipped bundle (lib/client.js) is the module-loader build of this
  * entry; this file is the readable TypeScript source it mirrors. Regenerate
@@ -9,12 +10,19 @@
  * @module dsh-notify-bark/client
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the ui-slots Context merge (ctx.slots) and the locale map.
+// Type-only: pulls the ui-slots Context merge and the locale namespace map.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+// Type-only: pulls the renderer's Context merge (ctx.slots) for typechecking.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: pulls the settings package's SlotMap merge for 'settings.section'.
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the Remote contribution contract for typing.
+import type { SnapshotSelectorHook, SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { barkRemote, type BarkGetValue, type BarkNotifyRemoteApi, type BarkSetPatch, type BarkSettingsView } from '../remote-contract.ts'
 import { BarkSettingsSection } from './BarkSettings.tsx'
 import { en, zh, type BarkNotifyKey } from './locales.ts'
 
@@ -28,10 +36,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /** Dictionary namespace owned by this plugin. */
-const NS = 'bark-notify'
-
-/** Logical RPC channel owned by this plugin. */
-export const RPC_CHANNEL = '/dsh-notify-bark'
+export const NS = 'bark-notify'
 
 /** Settings event flags, in display order. */
 export const EVENT_KEYS = [
@@ -39,17 +44,11 @@ export const EVENT_KEYS = [
   'maxTokens', 'interrupted', 'question', 'approval', 'planReview',
 ] as const
 
-/** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'connection'] as const
+/** Required services (cordis fiber inject; the namespace appears once mounted). */
+export const inject = ['slots', 'locale', 'remote'] as const
 
 /** Browser-facing settings view (barkUrl stripped Host-side). */
-export interface BarkSettingsView {
-  enabled: boolean
-  events: Record<string, boolean>
-  includeAssistantText: boolean
-  maxBodyChars: number
-  group: string
-}
+export type { BarkSettingsView } from '../remote-contract.ts'
 
 /** Section snapshot published by the controller. */
 export interface BarkSectionSnapshot {
@@ -65,10 +64,12 @@ export interface BarkSectionSnapshot {
 
 /**
  * Host transport for the section: reads the masked status, writes new
- * settings, and fires test pushes through the /dsh-notify-bark RPC.
+ * settings, and fires test pushes through the mounted barkNotify namespace.
+ * Calls wait for the mount before the first request; failures land in the
+ * snapshot's error face the section renders.
  */
 export class BarkSectionController {
-  readonly store = createSnapshotStore<BarkSectionSnapshot>({
+  readonly store: SnapshotStore<BarkSectionSnapshot> = createSnapshotStore<BarkSectionSnapshot>({
     status: 'loading',
     settings: null,
     urlConfigured: false,
@@ -79,15 +80,16 @@ export class BarkSectionController {
     testResult: null,
   })
 
-  constructor(private readonly connection: { rpc: { call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> } }) {
+  constructor(private readonly namespace: BarkNotifyRemoteApi, private readonly mounted: Promise<unknown>) {
     void this.load()
   }
 
   async load(): Promise<void> {
     try {
-      const result = await this.connection.rpc.call(RPC_CHANNEL, 'get', {})
-      if (!result.ok) throw new Error(result.error?.message ?? 'RPC failed')
-      const value = result.value as { settings: BarkSettingsView; status: { configured: boolean; masked: string } }
+      await this.mounted
+      const result = await this.namespace.get()
+      if (!result.ok) throw new Error(result.error.message)
+      const value = result.value as BarkGetValue
       this.store.update((draft) => {
         draft.status = 'ready'
         draft.settings = value.settings
@@ -103,14 +105,15 @@ export class BarkSectionController {
     }
   }
 
-  async save(patch: Record<string, unknown>): Promise<void> {
+  async save(patch: BarkSetPatch): Promise<void> {
     this.store.update((draft) => {
       draft.saving = true
       draft.saveError = null
     })
     try {
-      const result = await this.connection.rpc.call(RPC_CHANNEL, 'set', { patch })
-      if (!result.ok) throw new Error(result.error?.message ?? 'RPC failed')
+      await this.mounted
+      const result = await this.namespace.set(patch)
+      if (!result.ok) throw new Error(result.error.message)
       await this.load()
     } catch (error) {
       this.store.update((draft) => {
@@ -129,8 +132,9 @@ export class BarkSectionController {
       draft.testResult = null
     })
     try {
-      const result = await this.connection.rpc.call(RPC_CHANNEL, 'test', { group })
-      if (!result.ok) throw new Error(result.error?.message ?? 'RPC failed')
+      await this.mounted
+      const result = await this.namespace.test(group)
+      if (!result.ok) throw new Error(result.error.message)
       this.store.update((draft) => {
         draft.testResult = { ok: true, message: 'sent' }
       })
@@ -153,9 +157,15 @@ export class BarkSectionController {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-notify-bark: dictionaries')
 
-  ctx.inject(['slots', 'locale', 'connection'], (scope) => {
-    const controller = new BarkSectionController(scope.get('connection') as never)
-    const t = scope.locale.bind(NS)
+  // Mount the barkNotify contribution on the plugin fiber; every Consumer
+  // awaits the handle before its first call.
+  const mounted = ctx.remote.$mount(barkRemote)
+  ctx.inject(['slots', 'locale', 'remote', 'remote.barkNotify'], (scope) => {
+    const controller = new BarkSectionController(scope.get('remote.barkNotify') as BarkNotifyRemoteApi, mounted)
+    const bound = scope.locale.bind(NS)
+    // The component consumes a broad string-keyed translate; the binder is
+    // typed to the namespace key union, so widen it here.
+    const t = (key: string, params?: Record<string, string>): string => bound(key as BarkNotifyKey, params)
     const injected = () => ({ controller, t, hooks: { snapshot: controller.store } })
 
     scope.slots.inject('settings.section', () => scope.slots.register({
@@ -167,3 +177,6 @@ export function apply(ctx: ClientContext): void {
     }, BarkSettingsSection))
   })
 }
+
+/** Selector-hook face the framework synthesizes for the section (doc anchor). */
+export type SectionHooks = { snapshot: SnapshotSelectorHook<BarkSectionSnapshot> }

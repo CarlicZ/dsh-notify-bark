@@ -19,8 +19,21 @@ export interface NotificationIntent {
     /** Event-specific detail line (error message, question text, …). */
     detail: string;
 }
-/** Pull the last assistant reply's text blocks from the session log. */
-export declare function lastAssistantText(session: Session): string;
+/**
+ * Extract the assistant reply text from one `assistant/message` event.
+ * @param event - a session event; non-assistant events yield an empty string.
+ * @returns the event's text blocks joined by newlines, trimmed.
+ */
+export declare function assistantTextOf(event: SessionEvent): string;
+/**
+ * Scan an event list backwards for the newest assistant reply text. Kept as a
+ * pure helper (and the unit-test seam); the live listener instead tracks the
+ * latest reply incrementally, because DSH 0.2 removed synchronous session-log
+ * reads.
+ * @param events - session events in log order.
+ * @returns the newest assistant text, or an empty string.
+ */
+export declare function lastAssistantText(events: readonly SessionEvent[]): string;
 /**
  * Decide whether a session event should notify, and with what content.
  *

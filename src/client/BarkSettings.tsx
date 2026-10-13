@@ -7,8 +7,8 @@
  * @module dsh-notify-bark/client/BarkSettings
  */
 
-import { useState } from 'react'
-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-renderer/client'
+import { useState, type ReactElement } from 'react'
+import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-store'
 import { EVENT_KEYS, type BarkSectionController, type BarkSectionSnapshot } from './index.ts'
 import * as styles from './BarkSettings.module.css'
 
@@ -23,7 +23,7 @@ export interface BarkSettingsSectionProps {
 }
 
 /** Render the Bark notifications settings section. */
-export function BarkSettingsSection(props: BarkSettingsSectionProps): React.ReactElement | null {
+export function BarkSettingsSection(props: BarkSettingsSectionProps): ReactElement | null {
   const { t, controller, useSnapshot } = props
   const snap = useSnapshot((snapshot) => snapshot)
   const [urlDraft, setUrlDraft] = useState('')
@@ -44,7 +44,7 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): React.Reac
   const settings = snap.settings!
   const urlPlaceholder = snap.urlConfigured ? t('urlConfigured', { masked: snap.urlMasked }) : t('urlUnconfigured')
 
-  const toggleEvent = (key: string): void => {
+  const toggleEvent = (key: keyof typeof settings.events): void => {
     const next = { ...settings.events, [key]: !settings.events[key] }
     controller.store.update((draft) => {
       draft.settings = { ...draft.settings!, events: next }
@@ -143,7 +143,7 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): React.Reac
         <p className={styles.groupTitle}>{t('eventsTitle')}</p>
         {EVENT_KEYS.map((key) => (
           <label key={key} className={styles.check}>
-            <input type="checkbox" checked={settings.events[key]} onChange={() => toggleEvent(key)} />
+            <input type="checkbox" checked={settings.events[key as keyof typeof settings.events]} onChange={() => toggleEvent(key as keyof typeof settings.events)} />
             <span className={styles.checkLabel}>{t(`event.${key}`)}</span>
           </label>
         ))}

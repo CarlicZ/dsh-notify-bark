@@ -2,14 +2,14 @@
 
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
-> **License:** MIT · **Requires:** Node ^22.19 · **Platform:** DSH Host + Web settings page
+> **License:** MIT · **Requires:** Node ^22.19 · **DSH:** 0.2.0-rc.2 (`dsh-client-store` era) · **Platform:** DSH Host + Web settings page
 
 **[English](README.md) · [简体中文](README.zh-CN.md)**
 
 A [Bark](https://github.com/Finb/Bark) push-notification plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): the **DSH Host** listens for events such as turn completion, waiting for your answer, and waiting for approval, and pushes notifications to your iPhone through a Bark Server. Notifications are sent entirely from the Host — closing the browser, refreshing the page, or putting your computer to sleep does not affect delivery.
 
-- **Host half** (`src/index.ts` + `lib/*.js`): session/event listener + Bark HTTP sending + `bark` settings namespace (`ctx.settings` → `settings.yaml`, hot-reloaded) + `/dsh-notify-bark` loopback RPC.
-- **Browser half** (`src/client/` + `lib/client.js`): registers a `settings.section` slot; the form reads and writes Host config through the RPC. **The Bark URL never crosses the wire to the browser** — only a masked status is shown (configured: `••••••••3F82`).
+- **Host half** (`src/index.ts` + `lib/*.js`): session/event listener + Bark HTTP sending + the plugin entry's own `Config` schema (volatile fields persisted and hot-applied through DSH 0.2's `ctx.settings` document) + the `barkNotify` Typert Remote served on the shared `/api` channel.
+- **Browser half** (`src/client/` + `lib/client.js`): registers a `settings.section` slot; the form calls the mounted `barkNotify` Remote namespace. **The Bark URL never crosses the wire to the browser** — only a masked status is shown (configured: `••••••••3F82`).
 
 <p align="center">
   <img width="900" alt="Settings page" src="docs/images/settings-page.png" />
@@ -61,14 +61,16 @@ Refresh the browser settings page (gear → Bark notifications) to see the confi
 ## Security & privacy
 
 - **No built-in keys:** `barkUrl` defaults to empty; each deployer fills in their own Bark URL on the settings page (`https://api.day.app/your-key`). This repository contains no real credentials (tests use only a fake `testkey`).
-- **Credentials never reach the browser:** `barkUrl` is declared `role('secret')` in the schema; the RPC returns only a masked status (configured: `••••••••3F82`) and logs only `configured: true/false`.
-- **Config is stored on the Host only:** written to the Host-side `settings.yaml` and never uploaded to any third party; notifications are sent only to the Bark URL you configured.
+- **Credentials never reach the browser:** `barkUrl` is declared `role('secret')` in the schema; the Remote get answers only a masked status (configured: `••••••••3F82`) and logs only `configured: true/false`.
+- **Config is stored on the Host only:** written to the profile's DSH settings document on the Host and never uploaded to any third party; notifications are sent only to the Bark URL you configured.
 
 ## Development
 
-    pnpm install        # typescript / @types/node (lockfile: pnpm-lock.yaml)
-    pnpm run build      # tsc compiles the Host half to lib/; the client bundle is maintained directly in lib/client.js
-    pnpm test           # node:test unit tests (send layer / event mapping / defaults / dedup / masking)
+    pnpm install              # typescript / @types/node + the DSH 0.2 peer types (lockfile: pnpm-lock.yaml)
+    pnpm run typecheck        # Host half against the installed DSH 0.2 packages
+    pnpm run typecheck:client # browser-half source against the DSH 0.2 client packages
+    pnpm run build            # tsc compiles the Host half to lib/; the client bundle is maintained directly in lib/client.js
+    pnpm test                 # node:test unit + smoke tests (send / mapping / defaults / dedup / masking / remote contract / client bundle)
 
 ## Structure
 
@@ -78,12 +80,12 @@ Refresh the browser settings page (gear → Bark notifications) to see the confi
     ├── cordis.patch.yml      # plugin line insertion
     ├── LICENSE               # MIT
     ├── src/
-    │   ├── index.ts          # Host entry: settings registration + event listener + RPC
+    │   ├── index.ts          # Host entry: Config schema + event listener + Remote service
     │   ├── bark-service.ts   # Bark HTTP sending (timeout / error classification)
     │   ├── event-listener.ts # session/event → notification intent (dedup / title / content)
     │   ├── settings-store.ts # settings model / schema / defaults / masking
-    │   ├── rpc-contract.ts   # /dsh-notify-bark channel contract
-    │   ├── rpc.ts            # Host RPC (get masked / set / test)
+    │   ├── remote-contract.ts # shared Remote contract: payloads, validation, descriptors
+    │   ├── bark-remote.ts    # barkNotify Remote service (get masked / set / test)
     │   └── client/           # browser-half source (lib/client.js is its bundle mirror)
     ├── lib/                  # deployment artifacts (tsc-compiled Host + hand-maintained module-loader bundle)
     └── tests/                # node:test unit tests
@@ -91,9 +93,11 @@ Refresh the browser settings page (gear → Bark notifications) to see the confi
 ## Design notes
 
 - **Notifications go through the Host:** `ctx.on('session/event')` listens directly (the same path dsh-im-bridge uses); the browser is only a configuration panel.
-- **Config is stored on the Host:** the `bark` namespace is registered into `ctx.settings` and persisted to `settings.yaml`; DSH's web settings wire has a namespace whitelist (`WEB_SETTINGS_NAMESPACES`), and third-party namespaces go through `settings-not-exposed`, so the settings page uses a dedicated RPC (same architecture as dsh-codex-auth) to read and write.
-- **Credentials never reach the browser:** `barkUrl` is `role('secret')` and the RPC returns only masked status (`configured: ••••••••3F82`); logs output only `configured: true/false`.
+- **Config is stored on the Host:** on DSH 0.2 a plugin entry *is* its settings namespace, so the plugin exports a `Config` schema whose fields are `volatile()` (stable live references, no remount) and writes go through `ctx.settings`. The plugin suppresses the auto-generated page (`configure({ auto: false })`) and owns its `settings.section`; the `barkNotify` Remote keeps reads masked and set write-only.
+- **Settings writes are revision-fenced:** the set method reads the entry's revision from `ctx.settings.describe()` and passes it to `ctx.settings.update()`, so a stale editor cannot silently overwrite a concurrent change.
+- **Credentials never reach the browser:** `barkUrl` is `role('secret')` and the Remote returns only masked status (`configured: ••••••••3F82`); logs output only `configured: true/false`.
 - **Event dedup:** `sessionId` + `event.seq` key with a bounded ledger, so reconnects or replays never push duplicates.
+- **No RPC channels were harmed:** the `barkNotify` methods ride the standard Typert `/api` gateway (SRC discovery from the live service), not a custom `connection.rpc.handle` channel — the one surface that cannot work cross-plugin on DSH 0.2.
 
 ## References & acknowledgments
 

@@ -2,31 +2,39 @@
  * dsh-notify-bark — Host half.
  *
  * Mounts three pieces:
- *   1. a `bark` settings namespace (ctx.settings → $DSH_HOME/settings.yaml,
- *      live-applied), so the section's values survive restarts;
+ *   1. the plugin's Loader `Config` schema (volatile fields → live references
+ *      persisted through DSH's settings document and hot-applied in place);
  *   2. the session/event listener that turns turn endings, user questions,
  *      plan reviews, and approval requests into Bark pushes (Host-side, so the
  *      browser being closed does not matter);
- *   3. the /dsh-notify-bark loopback RPC the settings section reads and writes
- *      through (the Bark URL never crosses the wire — only a masked status).
+ *   3. the barkNotify Typert Remote the settings section reads and writes
+ *      through the shared /api channel (the Bark URL never rides a read).
  *
  * The browser half (the `./client` entry) registers the settings section.
  * @module dsh-notify-bark
  */
 import { Context } from '@deepseek-ai/cordis';
-import { type BarkSettings } from './settings-store.ts';
+import { Config } from './settings-store.ts';
 /** Stable cordis plugin name (matches the cordis.patch.yml insert id). */
 export declare const name = "bark-notify";
 /**
  * Required services: none hard — the settings seam and the connection service
  * are each awaited through `ctx.inject` inside apply, so a profile lacking
- * either still runs the event listener with composed defaults.
+ * either still runs the event listener with the composition defaults.
  */
 export declare const inject: string[];
 /**
+ * The plugin entry's profile id. DSH 0.2 addresses settings by profile entry
+ * id, and `cordis.patch.yml` inserts this row as `bark-notify`; every write
+ * through `ctx.settings` is keyed by this value.
+ */
+export declare const PROFILE_ENTRY_ID = "bark-notify";
+export { Config };
+/**
  * Plugin entry.
  * @param ctx - plugin context.
- * @param config - composition-layer overrides (entry config), merged below defaults.
+ * @param config - resolved volatile config: field access always follows the
+ *   current settings document.
  */
-export declare function apply(ctx: Context, config?: Partial<BarkSettings>): void;
+export declare function apply(ctx: Context, config: Config): void;
 //# sourceMappingURL=index.d.ts.map

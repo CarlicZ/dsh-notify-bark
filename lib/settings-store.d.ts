@@ -1,16 +1,20 @@
 /**
  * dsh-notify-bark settings model: schema, defaults, and event metadata.
  *
- * The namespace is registered Host-side through `ctx.settings` (so values
- * persist to $DSH_HOME/settings.yaml and hot-reload), and the browser never
- * touches it directly — the DSH web settings wire only exposes an explicit
- * allowlist of namespaces, and the Bark URL must stay on the Host. The
- * settings section reads and writes through the /dsh-notify-bark RPC instead.
+ * On DSH 0.2 the plugin entry's own config IS the settings namespace: the
+ * Host `Config` schema below is registered by the Loader, exposed to the
+ * settings transport (redacted, with `role('secret')` fields stripped), and
+ * hot-reloaded in place. Every editable field is `volatile()`, so the Loader
+ * hands `apply` stable `{ get() }` references instead of a frozen snapshot —
+ * reads always follow the current document without remounting the plugin.
+ *
+ * The browser never touches this schema directly: the settings section reads
+ * and writes through the /dsh-notify-bark RPC, and the Bark URL is only ever
+ * sent browser → Host (never echoed back).
  * @module dsh-notify-bark/settings-store
  */
+import type { Volatile } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-/** Settings namespace owned by this plugin. */
-export declare const BARK_SETTINGS_NAMESPACE: "bark";
 /** The nine notification events the section can toggle. */
 export interface BarkEventSettings {
     /** ✅ turn ended completed. */
@@ -47,71 +51,96 @@ export interface BarkSettings {
     /** Bark group the notifications land in. */
     group: string;
 }
+/**
+ * The resolved plugin config the Loader hands `apply`: every used field is a
+ * retained volatile reference, so reading it inside the event listener always
+ * follows the latest settings write.
+ */
+export interface Config {
+    /** Master switch; when off nothing is sent. */
+    enabled: Volatile<boolean>;
+    /** Full Bark endpoint — treated as a secret and never echoed to the browser. */
+    barkUrl: Volatile<string>;
+    /** Per-event notification switches (one volatile object). */
+    events: Volatile<BarkEventSettings>;
+    /** Append the AI's last reply to turn-end notifications. */
+    includeAssistantText: Volatile<boolean>;
+    /** Truncation bound for the notification body. */
+    maxBodyChars: Volatile<number>;
+    /** Bark group the notifications land in. */
+    group: Volatile<string>;
+}
 /** Composition defaults — what a fresh install ships with. */
 export declare const DEFAULT_SETTINGS: BarkSettings;
 /**
- * Settings schema: what the settings surface edits and how the stored section
- * resolves. `barkUrl` is `role('secret')` so any wire describe of this
- * namespace strips it; the Host RPC never sends it either way.
+ * The plugin's Loader config schema. Every editable field is `volatile()` so
+ * the settings transport can edit it live; `barkUrl` is `role('secret')` so
+ * any redacted describe never carries it.
  */
-export declare const barkSettingsSchema: z<Schemastery.ObjectS<{
-    enabled: z<boolean, boolean>;
-    barkUrl: z<string, string>;
-    events: z<Schemastery.ObjectS<{
-        completed: z<boolean, boolean>;
-        error: z<boolean, boolean>;
-        blocked: z<boolean, boolean>;
-        aborted: z<boolean, boolean>;
-        maxTokens: z<boolean, boolean>;
-        interrupted: z<boolean, boolean>;
-        question: z<boolean, boolean>;
-        approval: z<boolean, boolean>;
-        planReview: z<boolean, boolean>;
-    }>, Schemastery.ObjectT<{
-        completed: z<boolean, boolean>;
-        error: z<boolean, boolean>;
-        blocked: z<boolean, boolean>;
-        aborted: z<boolean, boolean>;
-        maxTokens: z<boolean, boolean>;
-        interrupted: z<boolean, boolean>;
-        question: z<boolean, boolean>;
-        approval: z<boolean, boolean>;
-        planReview: z<boolean, boolean>;
-    }>>;
-    includeAssistantText: z<boolean, boolean>;
-    maxBodyChars: z<number, number>;
-    group: z<string, string>;
-}>, Schemastery.ObjectT<{
-    enabled: z<boolean, boolean>;
-    barkUrl: z<string, string>;
-    events: z<Schemastery.ObjectS<{
-        completed: z<boolean, boolean>;
-        error: z<boolean, boolean>;
-        blocked: z<boolean, boolean>;
-        aborted: z<boolean, boolean>;
-        maxTokens: z<boolean, boolean>;
-        interrupted: z<boolean, boolean>;
-        question: z<boolean, boolean>;
-        approval: z<boolean, boolean>;
-        planReview: z<boolean, boolean>;
-    }>, Schemastery.ObjectT<{
-        completed: z<boolean, boolean>;
-        error: z<boolean, boolean>;
-        blocked: z<boolean, boolean>;
-        aborted: z<boolean, boolean>;
-        maxTokens: z<boolean, boolean>;
-        interrupted: z<boolean, boolean>;
-        question: z<boolean, boolean>;
-        approval: z<boolean, boolean>;
-        planReview: z<boolean, boolean>;
-    }>>;
-    includeAssistantText: z<boolean, boolean>;
-    maxBodyChars: z<number, number>;
-    group: z<string, string>;
-}>>;
+export declare const Config: z<Schemastery.ObjectS<NoInfer<{
+    enabled: z<boolean, boolean, "volatile-defined">;
+    barkUrl: z<string, string, "volatile-defined">;
+    events: z<NoInfer<Schemastery.ObjectS<NoInfer<{
+        completed: z<boolean, boolean, "defined">;
+        error: z<boolean, boolean, "defined">;
+        blocked: z<boolean, boolean, "defined">;
+        aborted: z<boolean, boolean, "defined">;
+        maxTokens: z<boolean, boolean, "defined">;
+        interrupted: z<boolean, boolean, "defined">;
+        question: z<boolean, boolean, "defined">;
+        approval: z<boolean, boolean, "defined">;
+        planReview: z<boolean, boolean, "defined">;
+    }>>>, NoInfer<Schemastery.ObjectT<NoInfer<{
+        completed: z<boolean, boolean, "defined">;
+        error: z<boolean, boolean, "defined">;
+        blocked: z<boolean, boolean, "defined">;
+        aborted: z<boolean, boolean, "defined">;
+        maxTokens: z<boolean, boolean, "defined">;
+        interrupted: z<boolean, boolean, "defined">;
+        question: z<boolean, boolean, "defined">;
+        approval: z<boolean, boolean, "defined">;
+        planReview: z<boolean, boolean, "defined">;
+    }>>>, "volatile">;
+    includeAssistantText: z<boolean, boolean, "volatile-defined">;
+    maxBodyChars: z<number, number, "volatile-defined">;
+    group: z<string, string, "volatile-defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    enabled: z<boolean, boolean, "volatile-defined">;
+    barkUrl: z<string, string, "volatile-defined">;
+    events: z<NoInfer<Schemastery.ObjectS<NoInfer<{
+        completed: z<boolean, boolean, "defined">;
+        error: z<boolean, boolean, "defined">;
+        blocked: z<boolean, boolean, "defined">;
+        aborted: z<boolean, boolean, "defined">;
+        maxTokens: z<boolean, boolean, "defined">;
+        interrupted: z<boolean, boolean, "defined">;
+        question: z<boolean, boolean, "defined">;
+        approval: z<boolean, boolean, "defined">;
+        planReview: z<boolean, boolean, "defined">;
+    }>>>, NoInfer<Schemastery.ObjectT<NoInfer<{
+        completed: z<boolean, boolean, "defined">;
+        error: z<boolean, boolean, "defined">;
+        blocked: z<boolean, boolean, "defined">;
+        aborted: z<boolean, boolean, "defined">;
+        maxTokens: z<boolean, boolean, "defined">;
+        interrupted: z<boolean, boolean, "defined">;
+        question: z<boolean, boolean, "defined">;
+        approval: z<boolean, boolean, "defined">;
+        planReview: z<boolean, boolean, "defined">;
+    }>>>, "volatile">;
+    includeAssistantText: z<boolean, boolean, "volatile-defined">;
+    maxBodyChars: z<number, number, "volatile-defined">;
+    group: z<string, string, "volatile-defined">;
+}>>, "plain">;
+/**
+ * Read a detached plain settings object from the live volatile config.
+ * @param config - resolved config handed to `apply`.
+ * @returns the current settings, defaults applied.
+ */
+export declare function readBarkSettings(config: Config): BarkSettings;
 /**
  * Map a `turn/end` reason kind onto the settings event flag. Kinds outside
- * the six official ones (plugin extensions) yield undefined and stay silent.
+ * the official set (plugin extensions) yield undefined and stay silent.
  */
 export declare const TURN_END_EVENT_FLAG: Record<string, keyof BarkEventSettings>;
 /**

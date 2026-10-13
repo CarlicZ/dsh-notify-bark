@@ -1,10 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  Config,
   DEFAULT_SETTINGS,
   EVENT_META,
   TURN_END_EVENT_FLAG,
   maskBarkUrl,
+  readBarkSettings,
   sanitizeBarkUrl,
 } from '../lib/settings-store.js'
 
@@ -58,4 +60,45 @@ test('maskBarkUrl never reveals the device key', () => {
   assert.equal(masked.masked, '••••••••3F82')
   assert.ok(!masked.masked.includes('DEADBEEF'))
   assert.equal(maskBarkUrl('').configured, false)
+})
+test('Config marks the endpoint secret and every editable field volatile', () => {
+  const json = Config.toJSON()
+  const root = json.refs[json.uid]
+  const metaOf = (field) => json.refs[root.dict[field]].meta
+  assert.equal(metaOf('barkUrl').role, 'secret')
+  assert.equal(metaOf('barkUrl').volatile, true)
+  assert.equal(metaOf('enabled').volatile, true)
+  assert.equal(metaOf('events').volatile, true)
+  assert.equal(metaOf('maxBodyChars').volatile, true)
+})
+
+test('readBarkSettings unwraps volatile references and defaults missing event keys', () => {
+  const events = { ...DEFAULT_SETTINGS.events, aborted: true }
+  const live = {
+    enabled: { get: () => true },
+    barkUrl: { get: () => 'https://api.day.app/key' },
+    events: { get: () => events },
+    includeAssistantText: { get: () => false },
+    maxBodyChars: { get: () => 120 },
+    group: { get: () => 'G' },
+  }
+  const read = readBarkSettings(live)
+  assert.equal(read.enabled, true)
+  assert.equal(read.barkUrl, 'https://api.day.app/key')
+  assert.equal(read.events.aborted, true)
+  assert.equal(read.includeAssistantText, false)
+  assert.equal(read.maxBodyChars, 120)
+  assert.equal(read.group, 'G')
+  assert.equal(readBarkSettings({ ...live, events: { get: () => ({ completed: false }) } }).events.error, true)
+})
+test('Config parse hands apply stable volatile references', () => {
+  const parsed = Config({ barkUrl: 'https://api.day.app/abc', events: { aborted: true } })
+  assert.equal(typeof parsed.enabled.get, 'function')
+  assert.equal(typeof parsed.events.get, 'function')
+  assert.equal(typeof parsed.barkUrl.get, 'function')
+  assert.equal(parsed.barkUrl.get(), 'https://api.day.app/abc')
+  assert.equal(parsed.events.get().aborted, true)
+  const read = readBarkSettings(parsed)
+  assert.equal(read.group, 'DeepSeek Harness')
+  assert.equal(read.events.aborted, true)
 })

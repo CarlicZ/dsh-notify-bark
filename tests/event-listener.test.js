@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  assistantTextOf,
   composeBody,
   createDedupLedger,
   intentOfEvent,
@@ -87,8 +88,23 @@ test('lastAssistantText returns the newest assistant text block', () => {
     event('assistant/message', { turn: 2, step: 1, message: { content: [{ type: 'text', text: 'newest reply' }] } }, 2),
     event('tool/call', { turn: 2, step: 2, callId: 'c', name: 'bash', arguments: '{}' }, 3),
   ]
-  assert.equal(lastAssistantText(session({ events })), 'newest reply')
-  assert.equal(lastAssistantText(session({ events: [] })), '')
+  assert.equal(lastAssistantText(events), 'newest reply')
+  assert.equal(lastAssistantText([]), '')
+})
+
+test('assistantTextOf reads only assistant text blocks', () => {
+  const assistantEvent = {
+    type: 'assistant/message',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1, step: 1, message: { content: [
+      { type: 'text', text: 'line one' },
+      { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+      { type: 'text', text: 'line two' },
+    ] } },
+  }
+  assert.equal(assistantTextOf(assistantEvent), 'line one\nline two')
+  assert.equal(assistantTextOf(event('user/message', { turn: 1, content: [] })), '')
 })
 
 test('composeBody appends assistant text only when enabled', () => {
