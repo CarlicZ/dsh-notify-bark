@@ -2,15 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   Config,
+  CONTENT_MAX_CHARS_LIMIT,
   DEFAULT_SETTINGS,
   EVENT_META,
+  TITLE_MAX_CHARS_LIMIT,
   TURN_END_EVENT_FLAG,
+  clampCharLimit,
   maskBarkUrl,
   readBarkSettings,
   sanitizeBarkUrl,
 } from '../lib/settings-store.js'
 
-test('defaults ship with the documented event toggles', () => {
+test('defaults ship with the documented event toggles and budgets', () => {
   assert.equal(DEFAULT_SETTINGS.enabled, true)
   assert.equal(DEFAULT_SETTINGS.events.completed, true)
   assert.equal(DEFAULT_SETTINGS.events.error, true)
@@ -22,7 +25,8 @@ test('defaults ship with the documented event toggles', () => {
   assert.equal(DEFAULT_SETTINGS.events.approval, true)
   assert.equal(DEFAULT_SETTINGS.events.planReview, false)
   assert.equal(DEFAULT_SETTINGS.includeAssistantText, true)
-  assert.equal(DEFAULT_SETTINGS.maxBodyChars, 300)
+  assert.equal(DEFAULT_SETTINGS.titleMaxChars, 20)
+  assert.equal(DEFAULT_SETTINGS.contentMaxChars, 50)
   assert.equal(DEFAULT_SETTINGS.group, 'DeepSeek Harness')
 })
 
@@ -35,6 +39,8 @@ test('turn/end reason kinds map onto the six official flags', () => {
   assert.equal(TURN_END_EVENT_FLAG['interrupted'], 'interrupted')
   // Unknown (plugin-extension) kinds stay silent.
   assert.equal(TURN_END_EVENT_FLAG['mystery'], undefined)
+  // DSH 0.2.1's fork-seed closer is not a live notification.
+  assert.equal(TURN_END_EVENT_FLAG['forked'], undefined)
 })
 
 test('event levels follow the agreed mapping', () => {
@@ -61,6 +67,7 @@ test('maskBarkUrl never reveals the device key', () => {
   assert.ok(!masked.masked.includes('DEADBEEF'))
   assert.equal(maskBarkUrl('').configured, false)
 })
+
 test('Config marks the endpoint secret and every editable field volatile', () => {
   const json = Config.toJSON()
   const root = json.refs[json.uid]
@@ -69,7 +76,9 @@ test('Config marks the endpoint secret and every editable field volatile', () =>
   assert.equal(metaOf('barkUrl').volatile, true)
   assert.equal(metaOf('enabled').volatile, true)
   assert.equal(metaOf('events').volatile, true)
-  assert.equal(metaOf('maxBodyChars').volatile, true)
+  assert.equal(metaOf('titleMaxChars').volatile, true)
+  assert.equal(metaOf('contentMaxChars').volatile, true)
+  assert.equal(metaOf('group').volatile, true)
 })
 
 test('readBarkSettings unwraps volatile references and defaults missing event keys', () => {
@@ -79,7 +88,8 @@ test('readBarkSettings unwraps volatile references and defaults missing event ke
     barkUrl: { get: () => 'https://api.day.app/key' },
     events: { get: () => events },
     includeAssistantText: { get: () => false },
-    maxBodyChars: { get: () => 120 },
+    titleMaxChars: { get: () => 12 },
+    contentMaxChars: { get: () => 40 },
     group: { get: () => 'G' },
   }
   const read = readBarkSettings(live)
@@ -87,18 +97,32 @@ test('readBarkSettings unwraps volatile references and defaults missing event ke
   assert.equal(read.barkUrl, 'https://api.day.app/key')
   assert.equal(read.events.aborted, true)
   assert.equal(read.includeAssistantText, false)
-  assert.equal(read.maxBodyChars, 120)
+  assert.equal(read.titleMaxChars, 12)
+  assert.equal(read.contentMaxChars, 40)
   assert.equal(read.group, 'G')
   assert.equal(readBarkSettings({ ...live, events: { get: () => ({ completed: false }) } }).events.error, true)
 })
+
+test('clampCharLimit keeps budgets inside their accepted range', () => {
+  assert.equal(clampCharLimit(0, TITLE_MAX_CHARS_LIMIT), 1)
+  assert.equal(clampCharLimit(-4, CONTENT_MAX_CHARS_LIMIT), 1)
+  assert.equal(clampCharLimit(19.6, TITLE_MAX_CHARS_LIMIT), 20)
+  assert.equal(clampCharLimit(9999, TITLE_MAX_CHARS_LIMIT), TITLE_MAX_CHARS_LIMIT)
+  assert.equal(clampCharLimit(Number.NaN, CONTENT_MAX_CHARS_LIMIT), 1)
+})
+
 test('Config parse hands apply stable volatile references', () => {
   const parsed = Config({ barkUrl: 'https://api.day.app/abc', events: { aborted: true } })
   assert.equal(typeof parsed.enabled.get, 'function')
   assert.equal(typeof parsed.events.get, 'function')
   assert.equal(typeof parsed.barkUrl.get, 'function')
+  assert.equal(typeof parsed.titleMaxChars.get, 'function')
+  assert.equal(typeof parsed.contentMaxChars.get, 'function')
   assert.equal(parsed.barkUrl.get(), 'https://api.day.app/abc')
   assert.equal(parsed.events.get().aborted, true)
   const read = readBarkSettings(parsed)
   assert.equal(read.group, 'DeepSeek Harness')
   assert.equal(read.events.aborted, true)
+  assert.equal(read.titleMaxChars, 20)
+  assert.equal(read.contentMaxChars, 50)
 })

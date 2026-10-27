@@ -2,13 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   assistantTextOf,
-  composeBody,
   createDedupLedger,
   intentOfEvent,
   lastAssistantText,
   workspaceNameOf,
 } from '../lib/event-listener.js'
-import { DEFAULT_SETTINGS } from '../lib/settings-store.js'
 
 /** Minimal session stub satisfying the fields the listener reads. */
 function session({ id = 's1', cwd, events = [] } = {}) {
@@ -31,7 +29,7 @@ test('workspaceNameOf derives the workspace title from the cwd basename', () => 
   assert.equal(workspaceNameOf(sessionWithCwd('')), 's1')
 })
 
-test('intentOfEvent maps all six turn/end reasons', () => {
+test('intentOfEvent maps all six live turn/end reasons', () => {
   const cases = [
     ['completed', 'completed', '✅ 任务完成'],
     ['error', 'error', '❌ 执行失败'],
@@ -45,6 +43,8 @@ test('intentOfEvent maps all six turn/end reasons', () => {
     assert.equal(intent?.flag, flag, kind)
     assert.equal(intent?.headline, headline, kind)
   }
+  // A fork-seed closer is durable history, not a live event worth a push.
+  assert.equal(intentOfEvent(event('turn/end', { turn: 1, reason: { kind: 'forked' } })), undefined)
 })
 
 test('intentOfEvent carries the error message for error turns', () => {
@@ -52,34 +52,42 @@ test('intentOfEvent carries the error message for error turns', () => {
   assert.equal(intent?.detail, 'npm build failed')
 })
 
-test('intentOfEvent maps ask_user_question tool calls to the question intent', () => {
+test('intentOfEvent maps ask_user_question tool calls and keeps the raw arguments', () => {
+  const raw = JSON.stringify({ questions: [{ id: 'q1', question: '请选择通知消息的展示方式' }] })
   const intent = intentOfEvent(event('tool/call', {
     turn: 1,
     step: 1,
     callId: 'c1',
     name: 'ask_user_question',
-    arguments: JSON.stringify({ questions: [{ id: 'q1', question: '请选择通知消息的展示方式' }] }),
+    arguments: raw,
   }))
   assert.equal(intent?.flag, 'question')
   assert.equal(intent?.detail, '请选择通知消息的展示方式')
   assert.equal(intent?.headline, '❓ 等待你的回答')
+  assert.equal(intent?.toolName, 'ask_user_question')
+  assert.equal(intent?.toolArguments, raw)
 })
 
 test('intentOfEvent maps exit_plan_mode tool calls to the plan-review intent', () => {
   const intent = intentOfEvent(event('tool/call', { turn: 1, step: 1, callId: 'c2', name: 'exit_plan_mode', arguments: '{}' }))
   assert.equal(intent?.flag, 'planReview')
+  assert.equal(intent?.toolName, 'exit_plan_mode')
 })
 
-test('intentOfEvent maps approval/asked events to the approval intent', () => {
-  const intent = intentOfEvent(event('approval/asked', { id: 'a1', toolName: 'bash', reason: '命令需要授权' }))
+test('intentOfEvent maps approval/asked events and keeps tool, reason, and callId', () => {
+  const intent = intentOfEvent(event('approval/asked', { id: 'a1', toolName: 'bash', callId: 'c9', reason: '命令需要授权' }))
   assert.equal(intent?.flag, 'approval')
   assert.ok(intent?.detail.includes('bash'))
   assert.ok(intent?.detail.includes('需要授权'))
+  assert.equal(intent?.toolName, 'bash')
+  assert.equal(intent?.reason, '命令需要授权')
+  assert.equal(intent?.callId, 'c9')
 })
 
 test('unrelated events produce no intent', () => {
   assert.equal(intentOfEvent(event('user/message', { turn: 1, content: [], source: { kind: 'user' } })), undefined)
   assert.equal(intentOfEvent(event('tool/call', { turn: 1, step: 1, callId: 'c3', name: 'bash', arguments: '{}' })), undefined)
+  assert.equal(intentOfEvent(event('approval/decided', { id: 'a1', outcome: 'allowed-once' })), undefined)
 })
 
 test('lastAssistantText returns the newest assistant text block', () => {
@@ -105,21 +113,6 @@ test('assistantTextOf reads only assistant text blocks', () => {
   }
   assert.equal(assistantTextOf(assistantEvent), 'line one\nline two')
   assert.equal(assistantTextOf(event('user/message', { turn: 1, content: [] })), '')
-})
-
-test('composeBody appends assistant text only when enabled', () => {
-  const intent = { flag: 'completed', headline: '✅ 任务完成', detail: '' }
-  const withText = composeBody(intent, { ...DEFAULT_SETTINGS, includeAssistantText: true }, '完成啦')
-  assert.ok(withText.includes('完成啦'))
-  const without = composeBody(intent, { ...DEFAULT_SETTINGS, includeAssistantText: false }, '完成啦')
-  assert.ok(!without.includes('完成啦'))
-})
-
-test('composeBody truncates to maxBodyChars with an ellipsis', () => {
-  const intent = { flag: 'completed', headline: '✅ 任务完成', detail: 'x'.repeat(500) }
-  const body = composeBody(intent, { ...DEFAULT_SETTINGS, maxBodyChars: 50 }, '')
-  assert.ok(body.length <= 51)
-  assert.ok(body.endsWith('…'))
 })
 
 test('dedup ledger admits each key once', () => {

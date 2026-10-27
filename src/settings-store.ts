@@ -1,7 +1,7 @@
 /**
  * dsh-notify-bark settings model: schema, defaults, and event metadata.
  *
- * On DSH 0.2 the plugin entry's own config IS the settings namespace: the
+ * On DSH 0.2+ the plugin entry's own config IS the settings namespace: the
  * Host `Config` schema below is registered by the Loader, exposed to the
  * settings transport (redacted, with `role('secret')` fields stripped), and
  * hot-reloaded in place. Every editable field is `volatile()`, so the Loader
@@ -9,7 +9,7 @@
  * reads always follow the current document without remounting the plugin.
  *
  * The browser never touches this schema directly: the settings section reads
- * and writes through the /dsh-notify-bark RPC, and the Bark URL is only ever
+ * and writes through the barkNotify Remote, and the Bark URL is only ever
  * sent browser → Host (never echoed back).
  * @module dsh-notify-bark/settings-store
  */
@@ -47,13 +47,27 @@ export interface BarkSettings {
   barkUrl: string
   /** Per-event notification switches. */
   events: BarkEventSettings
-  /** Append the AI's last reply to turn-end notifications. */
+  /** Include the AI's last reply as summarizer material. */
   includeAssistantText: boolean
-  /** Truncation bound for the notification body. */
-  maxBodyChars: number
-  /** Bark group the notifications land in. */
+  /** Title budget in user-perceived characters. */
+  titleMaxChars: number
+  /** Body budget in user-perceived characters. */
+  contentMaxChars: number
+  /** Fallback Bark group when the workspace `.env` sets none. */
   group: string
 }
+
+/** Default title budget ("字"). */
+export const DEFAULT_TITLE_MAX_CHARS = 20
+
+/** Default body budget ("字"). */
+export const DEFAULT_CONTENT_MAX_CHARS = 50
+
+/** Upper bound accepted for the title budget. */
+export const TITLE_MAX_CHARS_LIMIT = 80
+
+/** Upper bound accepted for the body budget. */
+export const CONTENT_MAX_CHARS_LIMIT = 500
 
 /**
  * The resolved plugin config the Loader hands `apply`: every used field is a
@@ -67,11 +81,13 @@ export interface Config {
   barkUrl: Volatile<string>
   /** Per-event notification switches (one volatile object). */
   events: Volatile<BarkEventSettings>
-  /** Append the AI's last reply to turn-end notifications. */
+  /** Include the AI's last reply as summarizer material. */
   includeAssistantText: Volatile<boolean>
-  /** Truncation bound for the notification body. */
-  maxBodyChars: Volatile<number>
-  /** Bark group the notifications land in. */
+  /** Title budget in user-perceived characters. */
+  titleMaxChars: Volatile<number>
+  /** Body budget in user-perceived characters. */
+  contentMaxChars: Volatile<number>
+  /** Fallback Bark group when the workspace `.env` sets none. */
   group: Volatile<string>
 }
 
@@ -91,7 +107,8 @@ export const DEFAULT_SETTINGS: BarkSettings = {
     planReview: false,
   },
   includeAssistantText: true,
-  maxBodyChars: 300,
+  titleMaxChars: DEFAULT_TITLE_MAX_CHARS,
+  contentMaxChars: DEFAULT_CONTENT_MAX_CHARS,
   group: 'DeepSeek Harness',
 }
 
@@ -115,9 +132,21 @@ export const Config = z.object({
     planReview: z.boolean().default(false),
   }).volatile(),
   includeAssistantText: z.boolean().default(true).volatile(),
-  maxBodyChars: z.number().min(1).max(4000).default(300).volatile(),
+  titleMaxChars: z.number().step(1).min(1).max(TITLE_MAX_CHARS_LIMIT).default(DEFAULT_TITLE_MAX_CHARS).volatile(),
+  contentMaxChars: z.number().step(1).min(1).max(CONTENT_MAX_CHARS_LIMIT).default(DEFAULT_CONTENT_MAX_CHARS).volatile(),
   group: z.string().default('DeepSeek Harness').volatile(),
 })
+
+/**
+ * Clamp a user-supplied character budget into its accepted range.
+ * @param value - candidate from a settings write.
+ * @param max - inclusive upper bound.
+ * @returns a positive integer within `[1, max]`.
+ */
+export function clampCharLimit(value: number, max: number): number {
+  if (!Number.isFinite(value)) return 1
+  return Math.min(max, Math.max(1, Math.round(value)))
+}
 
 /**
  * Read a detached plain settings object from the live volatile config.
@@ -130,14 +159,16 @@ export function readBarkSettings(config: Config): BarkSettings {
     barkUrl: config.barkUrl.get(),
     events: { ...DEFAULT_SETTINGS.events, ...config.events.get() },
     includeAssistantText: config.includeAssistantText.get(),
-    maxBodyChars: config.maxBodyChars.get(),
+    titleMaxChars: clampCharLimit(config.titleMaxChars.get(), TITLE_MAX_CHARS_LIMIT),
+    contentMaxChars: clampCharLimit(config.contentMaxChars.get(), CONTENT_MAX_CHARS_LIMIT),
     group: config.group.get(),
   }
 }
 
 /**
  * Map a `turn/end` reason kind onto the settings event flag. Kinds outside
- * the official set (plugin extensions) yield undefined and stay silent.
+ * the official set (plugin extensions, fork seeds) yield undefined and stay
+ * silent.
  */
 export const TURN_END_EVENT_FLAG: Record<string, keyof BarkEventSettings> = {
   completed: 'completed',
@@ -149,15 +180,14 @@ export const TURN_END_EVENT_FLAG: Record<string, keyof BarkEventSettings> = {
 }
 
 /**
- * Bark push levels, mirroring the user's suggestion:
- * completed → active; waiting/error states → timeSensitive; aborted → passive.
- * critical is intentionally never used by default.
+ * Bark push levels: completed → active; waiting/error states → timeSensitive;
+ * aborted → passive. critical is intentionally never used by default.
  */
 export type BarkLevel = 'active' | 'timeSensitive' | 'passive' | 'critical'
 
 /** Per-event presentation metadata. */
 export interface BarkEventMeta {
-  /** One-line headline shown as the notification body's first line. */
+  /** One-line headline, the fallback body's first line and summarizer input. */
   headline: string
   /** Bark level for this event. */
   level: BarkLevel
@@ -179,7 +209,7 @@ export const EVENT_META: Record<keyof BarkEventSettings, BarkEventMeta> = {
 /**
  * Normalize a Bark endpoint: trim and strip trailing slashes so the JSON POST
  * hits exactly the server root (Bark V2 accepts `POST <base>` with a JSON
- * body carrying title/body/group/level).
+ * body carrying title/body/group/level/icon).
  */
 export function sanitizeBarkUrl(input: string): string {
   return input.trim().replace(/\/+$/, '')

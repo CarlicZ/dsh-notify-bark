@@ -12,6 +12,8 @@ export interface BarkPayload {
     group?: string;
     level?: BarkLevel;
     sound?: string;
+    /** Absolute http(s) URL the Bark server fetches as the notification icon. */
+    icon?: string;
     url?: string;
 }
 /** Stable send-failure taxonomy surfaced to the settings section. */

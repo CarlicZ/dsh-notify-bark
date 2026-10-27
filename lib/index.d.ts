@@ -6,7 +6,9 @@
  *      persisted through DSH's settings document and hot-applied in place);
  *   2. the session/event listener that turns turn endings, user questions,
  *      plan reviews, and approval requests into Bark pushes (Host-side, so the
- *      browser being closed does not matter);
+ *      browser being closed does not matter). Each push is summarized by the
+ *      current default model and may take its icon/group from the workspace
+ *      `.env`;
  *   3. the barkNotify Typert Remote the settings section reads and writes
  *      through the shared /api channel (the Bark URL never rides a read).
  *

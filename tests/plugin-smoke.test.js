@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { DEFAULT_SETTINGS } from '../lib/settings-store.js'
@@ -13,7 +16,8 @@ function liveConfig(overrides = {}) {
     barkUrl: 'https://api.day.app/testkey/',
     events: { ...DEFAULT_SETTINGS.events },
     includeAssistantText: true,
-    maxBodyChars: 300,
+    titleMaxChars: 20,
+    contentMaxChars: 50,
     group: 'DeepSeek Harness',
     ...overrides,
   }
@@ -22,7 +26,8 @@ function liveConfig(overrides = {}) {
     barkUrl: { get: () => values.barkUrl },
     events: { get: () => values.events },
     includeAssistantText: { get: () => values.includeAssistantText },
-    maxBodyChars: { get: () => values.maxBodyChars },
+    titleMaxChars: { get: () => values.titleMaxChars },
+    contentMaxChars: { get: () => values.contentMaxChars },
     group: { get: () => values.group },
   }
   return { values, live }
@@ -89,6 +94,8 @@ test('barkNotify.get() answers the masked status and never echoes the URL', asyn
   assert.equal(got.status.masked.endsWith('tkey'), true)
   assert.equal('barkUrl' in got.settings, false)
   assert.equal(got.settings.events.completed, DEFAULT_SETTINGS.events.completed)
+  assert.equal(got.settings.titleMaxChars, 20)
+  assert.equal(got.settings.contentMaxChars, 50)
 })
 
 test('barkNotify.set() persists normalized patches with the entry revision and rejects bad ones', async () => {
@@ -138,7 +145,7 @@ test('session/event listener pushes with the workspace title, level, and cached 
     data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'done and dusted' }] } },
   })
   boot.listener(session, { type: 'turn/end', seq: 9, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  await new Promise((resolve) => setTimeout(resolve, 80))
 
   assert.ok(captured, 'a bark push should have been sent')
   const body = JSON.parse(captured.init.body)
@@ -146,6 +153,30 @@ test('session/event listener pushes with the workspace title, level, and cached 
   assert.equal(body.level, 'active')
   assert.ok(body.body.includes('✅ 任务完成'))
   assert.ok(body.body.includes('done and dusted'))
+  assert.ok([...body.body].length <= 50)
+})
+
+test('workspace .env overrides the Bark icon and group per session', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-bark-smoke-'))
+  let captured = null
+  globalThis.fetch = async (url, init) => {
+    captured = { url, init }
+    return new Response('{"code":200}', { status: 200 })
+  }
+  try {
+    await writeFile(join(directory, '.env'), 'DSH_BARK_ICON=https://example.com/project.png\nDSH_BARK_GROUP=Project Notifications\n', 'utf8')
+    const boot = await bootHost(liveConfig().live, settingsStub())
+    const session = { id: 's2', header: { cwd: directory } }
+    boot.listener(session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    assert.ok(captured, 'a bark push should have been sent')
+    const body = JSON.parse(captured.init.body)
+    assert.equal(body.group, 'Project Notifications')
+    assert.equal(body.icon, 'https://example.com/project.png')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('shipped client bundle mounts the remote and registers the settings section', async () => {
@@ -198,7 +229,7 @@ test('shipped client bundle mounts the remote and registers the settings section
   const namespace = {
     async get() {
       calls.push('get')
-      return { ok: true, value: { settings: { enabled: true, events: {}, includeAssistantText: true, maxBodyChars: 300, group: 'G' }, status: { configured: false, masked: '' } } }
+      return { ok: true, value: { settings: { enabled: true, events: {}, includeAssistantText: true, titleMaxChars: 20, contentMaxChars: 50, group: 'G' }, status: { configured: false, masked: '' } } }
     },
     async set(patch) {
       calls.push('set:' + JSON.stringify(patch))

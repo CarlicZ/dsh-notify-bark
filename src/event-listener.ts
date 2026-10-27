@@ -3,6 +3,12 @@
  * and maps turn endings, user questions, plan reviews, and approval requests
  * onto Bark pushes. Everything runs on the Host, so the browser being closed
  * does not matter — the same path dsh-im-bridge uses for WeChat.
+ *
+ * Delivery is asynchronous and best-effort: the listener only decides whether
+ * an event is notifiable, then a detached pipeline reads the workspace `.env`,
+ * asks the current default model for a short body, and posts to Bark. A slow
+ * or failed model call never blocks the session and never suppresses the push
+ * (the deterministic fallback body is used instead).
  * @module dsh-notify-bark/event-listener
  */
 
@@ -12,7 +18,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 // Type-only: pulls dsh-user-approval's session event-map augmentation, which
 // adds the approval/asked event to the SessionEventMap interface.
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { sendBark } from './bark-service.ts'
+import { sendBark, type BarkPayload } from './bark-service.ts'
 import {
   EVENT_META,
   TURN_END_EVENT_FLAG,
@@ -20,6 +26,14 @@ import {
   type BarkEventSettings,
   type BarkSettings,
 } from './settings-store.ts'
+import {
+  contentFromSummary,
+  notificationTitle,
+  summaryMaterial,
+  type NotificationIntent,
+} from './notification.ts'
+import { summarizeContent, SUMMARY_TIMEOUT_MS } from './summarize.ts'
+import { readWorkspaceBarkEnv, workspaceDirectoryOf } from './workspace-env.ts'
 
 /** Workspace title for a session: last path segment of its cwd, else its id. */
 export function workspaceNameOf(session: Session): string {
@@ -27,15 +41,20 @@ export function workspaceNameOf(session: Session): string {
   return cwd !== undefined && cwd.length > 0 ? basename(cwd) : String(session.id)
 }
 
-/** A decided notification: which event fired, its headline, and extra detail. */
-export interface NotificationIntent {
-  /** The settings event flag this notification maps to. */
-  flag: keyof BarkEventSettings
-  /** Headline, e.g. "✅ 任务完成". */
-  headline: string
-  /** Event-specific detail line (error message, question text, …). */
-  detail: string
+/** One tracked tool call: enough to describe an approval to the model. */
+interface TrackedToolCall {
+  name: string
+  arguments: string
 }
+
+/** Calls kept per session for approval lookups. */
+const MAX_CALLS_PER_SESSION = 16
+
+/** Sessions whose latest reply and calls are tracked. */
+const MAX_TRACKED_SESSIONS = 200
+
+/** Whole notification pipeline deadline (summary + `.env` read + Bark POST). */
+const DELIVERY_TIMEOUT_MS = SUMMARY_TIMEOUT_MS + 6000
 
 /**
  * Extract the assistant reply text from one `assistant/message` event.
@@ -55,8 +74,8 @@ export function assistantTextOf(event: SessionEvent): string {
 /**
  * Scan an event list backwards for the newest assistant reply text. Kept as a
  * pure helper (and the unit-test seam); the live listener instead tracks the
- * latest reply incrementally, because DSH 0.2 removed synchronous session-log
- * reads.
+ * latest reply incrementally, because a live session's log is append-only and
+ * the listener sees every message event anyway.
  * @param events - session events in log order.
  * @returns the newest assistant text, or an empty string.
  */
@@ -109,6 +128,8 @@ export function intentOfEvent(event: SessionEvent): NotificationIntent | undefin
           flag: 'question',
           headline: EVENT_META.question.headline,
           detail: question,
+          toolName: 'ask_user_question',
+          toolArguments: event.data.arguments,
         }
       }
       if (event.data.name === 'exit_plan_mode') {
@@ -116,6 +137,8 @@ export function intentOfEvent(event: SessionEvent): NotificationIntent | undefin
           flag: 'planReview',
           headline: EVENT_META.planReview.headline,
           detail: 'Agent 已提交计划，等待你的确认',
+          toolName: 'exit_plan_mode',
+          toolArguments: event.data.arguments,
         }
       }
       return undefined
@@ -127,20 +150,14 @@ export function intentOfEvent(event: SessionEvent): NotificationIntent | undefin
         flag: 'approval',
         headline: EVENT_META.approval.headline,
         detail: `${tool} 需要授权${reason}`,
+        ...event.data.toolName.length > 0 ? { toolName: event.data.toolName } : {},
+        ...event.data.reason !== undefined ? { reason: event.data.reason } : {},
+        ...event.data.callId !== undefined ? { callId: String(event.data.callId) } : {},
       }
     }
     default:
       return undefined
   }
-}
-
-/** Compose the final body, honoring the content-length bound. */
-export function composeBody(intent: NotificationIntent, settings: BarkSettings, assistantText: string): string {
-  const parts = [intent.headline]
-  if (intent.detail.length > 0) parts.push(intent.detail)
-  if (settings.includeAssistantText && assistantText.length > 0) parts.push('', assistantText)
-  const body = parts.join('\n')
-  return body.length > settings.maxBodyChars ? `${body.slice(0, settings.maxBodyChars)}…` : body
 }
 
 /** Bounded dedup ledger: one entry per session:seq, evicting the oldest. */
@@ -166,7 +183,7 @@ export function createDedupLedger(maxEntries = 500): { test(key: string): boolea
  * Subscribe the plugin to `session/event` and push Bark notifications.
  * @param ctx - plugin context.
  * @param getSettings - live settings thunk (follows the settings section).
- * @returns the disposer removing the listener (cordis ctx.on returns one).
+ * @returns the disposer removing the listener and aborting in-flight pushes.
  */
 export function createEventListener(ctx: Context, getSettings: () => BarkSettings): () => void {
   const dedup = createDedupLedger()
@@ -174,16 +191,104 @@ export function createEventListener(ctx: Context, getSettings: () => BarkSetting
   // notifications ride, so turn/end never needs a synchronous session-log read
   // (DSH 0.2 removed `session.events`). Insertion order is the LRU order.
   const lastReply = new Map<string, string>()
-  const maxTrackedSessions = 200
+  // Recent tool calls per session keyed by callId: an approval/asked event
+  // follows its tool/call, so the arguments (command, path, patch) that made
+  // the push worth reading are available without touching the session log.
+  const recentCalls = new Map<string, Map<string, TrackedToolCall>>()
+  // One controller per detached delivery, aborted when the plugin unloads.
+  const inflight = new Set<AbortController>()
+
+  const rememberCall = (sessionId: string, callId: string, call: TrackedToolCall): void => {
+    let calls = recentCalls.get(sessionId)
+    if (calls === undefined) {
+      calls = new Map()
+      recentCalls.set(sessionId, calls)
+      if (recentCalls.size > MAX_TRACKED_SESSIONS) {
+        const oldest = recentCalls.keys().next().value
+        if (oldest !== undefined) recentCalls.delete(oldest)
+      }
+    }
+    calls.delete(callId)
+    calls.set(callId, call)
+    if (calls.size > MAX_CALLS_PER_SESSION) {
+      const oldest = calls.keys().next().value
+      if (oldest !== undefined) calls.delete(oldest)
+    }
+  }
+
+  const forgetCall = (sessionId: string, callId: string): void => {
+    const calls = recentCalls.get(sessionId)
+    if (calls === undefined) return
+    calls.delete(callId)
+    if (calls.size === 0) recentCalls.delete(sessionId)
+  }
+
+  const toolArgumentsFor = (sessionId: string, intent: NotificationIntent): string | undefined => {
+    if (intent.toolArguments !== undefined) return intent.toolArguments
+    const calls = recentCalls.get(sessionId)
+    if (calls === undefined) return undefined
+    if (intent.callId !== undefined) return calls.get(intent.callId)?.arguments
+    // No callId on the ask: the approval follows the newest call in practice.
+    let latest: TrackedToolCall | undefined
+    for (const call of calls.values()) latest = call
+    return latest?.arguments
+  }
+
+  /**
+   * Run one detached notification: `.env` overrides → model summary → Bark.
+   * Never throws into the event dispatch; failures are logged without the
+   * endpoint or any `.env` value.
+   */
+  const deliver = async (
+    session: Session,
+    intent: NotificationIntent,
+    settings: BarkSettings,
+    assistantText: string,
+    endpoint: string,
+  ): Promise<void> => {
+    const controller = new AbortController()
+    inflight.add(controller)
+    const timer = setTimeout(() => controller.abort(new Error('notification timeout')), DELIVERY_TIMEOUT_MS)
+    try {
+      const workspaceName = workspaceNameOf(session)
+      const env = await readWorkspaceBarkEnv(workspaceDirectoryOf(ctx, session))
+      if (controller.signal.aborted) return
+      const callArguments = toolArgumentsFor(String(session.id), intent)
+      const materialIntent: NotificationIntent = callArguments === undefined
+        ? intent
+        : { ...intent, toolArguments: callArguments }
+      const summary = await summarizeContent(ctx, {
+        material: summaryMaterial({ intent: materialIntent, settings, assistantText, workspaceName }),
+        limit: settings.contentMaxChars,
+      }, controller.signal)
+      if (controller.signal.aborted) return
+      const payload: BarkPayload = {
+        title: notificationTitle(workspaceName, settings),
+        body: contentFromSummary(summary, intent, settings, assistantText),
+        group: env.group ?? settings.group,
+        level: EVENT_META[intent.flag].level,
+        ...env.icon === undefined ? {} : { icon: env.icon },
+      }
+      await sendBark(endpoint, payload)
+    } catch (error) {
+      // Never log the endpoint (it carries the device key) or `.env` values.
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.logger.warn(`[bark-notify] 推送失败: ${message}`)
+    } finally {
+      clearTimeout(timer)
+      inflight.delete(controller)
+    }
+  }
 
   const listener = (session: Session, event: SessionEvent): void => {
+    const sessionId = String(session.id)
+
     if (event.type === 'assistant/message') {
       const text = assistantTextOf(event)
       if (text.length > 0) {
-        const key = String(session.id)
-        lastReply.delete(key)
-        lastReply.set(key, text)
-        if (lastReply.size > maxTrackedSessions) {
+        lastReply.delete(sessionId)
+        lastReply.set(sessionId, text)
+        if (lastReply.size > MAX_TRACKED_SESSIONS) {
           const oldest = lastReply.keys().next().value
           if (oldest !== undefined) lastReply.delete(oldest)
         }
@@ -191,8 +296,25 @@ export function createEventListener(ctx: Context, getSettings: () => BarkSetting
       return
     }
 
+    if (event.type === 'tool/call') {
+      // Question and plan-review calls are themselves notifiable; every other
+      // call is only remembered so a later approval can describe it.
+      if (event.data.name !== 'ask_user_question' && event.data.name !== 'exit_plan_mode') {
+        rememberCall(sessionId, String(event.data.callId), {
+          name: event.data.name,
+          arguments: event.data.arguments,
+        })
+        return
+      }
+    }
+
+    if (event.type === 'tool/result') {
+      forgetCall(sessionId, String(event.data.message.source.callId))
+      return
+    }
+
     // One push per logical event, even across reconnects or reloads.
-    if (!dedup.test(`${session.id}:${event.seq}`)) return
+    if (!dedup.test(`${sessionId}:${event.seq}`)) return
 
     const settings = getSettings()
     if (!settings.enabled) return
@@ -203,21 +325,14 @@ export function createEventListener(ctx: Context, getSettings: () => BarkSetting
     if (intent === undefined) return
     if (!settings.events[intent.flag]) return
 
-    const assistantText = event.type === 'turn/end' ? (lastReply.get(String(session.id)) ?? '') : ''
-    const meta = EVENT_META[intent.flag]
-    const body = composeBody(intent, settings, assistantText)
-
-    void sendBark(endpoint, {
-      title: workspaceNameOf(session),
-      body,
-      group: settings.group,
-      level: meta.level,
-    }).catch((error: unknown) => {
-      // Never log the endpoint (it carries the device key).
-      const message = error instanceof Error ? error.message : String(error)
-      ctx.logger.warn(`[bark-notify] 推送失败（已配置:${settings.barkUrl.length > 0}）: ${message}`)
-    })
+    const assistantText = event.type === 'turn/end' ? (lastReply.get(sessionId) ?? '') : ''
+    void deliver(session, intent, settings, assistantText, endpoint)
   }
 
-  return ctx.on('session/event', listener)
+  const dispose = ctx.on('session/event', listener)
+  return () => {
+    dispose()
+    for (const controller of inflight) controller.abort(new Error('plugin unloaded'))
+    inflight.clear()
+  }
 }

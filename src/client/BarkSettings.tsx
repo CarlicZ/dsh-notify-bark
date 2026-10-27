@@ -28,7 +28,8 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): ReactEleme
   const snap = useSnapshot((snapshot) => snapshot)
   const [urlDraft, setUrlDraft] = useState('')
   const [groupDraft, setGroupDraft] = useState('')
-  const [bodyCharsDraft, setBodyCharsDraft] = useState('')
+  const [titleCharsDraft, setTitleCharsDraft] = useState('')
+  const [contentCharsDraft, setContentCharsDraft] = useState('')
 
   if (snap.status === 'loading') {
     return <p className={styles.hint}>{t('loading')}</p>
@@ -66,15 +67,26 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): ReactEleme
     void controller.save({ group: value })
   }
 
-  const saveBodyChars = (): void => {
-    const parsed = Number(bodyCharsDraft)
+  const saveTitleChars = (): void => {
+    const parsed = Number(titleCharsDraft)
     if (!Number.isFinite(parsed)) {
-      setBodyCharsDraft('')
+      setTitleCharsDraft('')
       return
     }
-    const clamped = Math.min(4000, Math.max(1, Math.round(parsed)))
-    setBodyCharsDraft('')
-    void controller.save({ maxBodyChars: clamped })
+    const clamped = Math.min(80, Math.max(1, Math.round(parsed)))
+    setTitleCharsDraft('')
+    void controller.save({ titleMaxChars: clamped })
+  }
+
+  const saveContentChars = (): void => {
+    const parsed = Number(contentCharsDraft)
+    if (!Number.isFinite(parsed)) {
+      setContentCharsDraft('')
+      return
+    }
+    const clamped = Math.min(500, Math.max(1, Math.round(parsed)))
+    setContentCharsDraft('')
+    void controller.save({ contentMaxChars: clamped })
   }
 
   const onTest = (): void => {
@@ -167,20 +179,36 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): ReactEleme
         </label>
         <p className={styles.hint}>{t('includeAssistantHint')}</p>
         <div className={styles.row}>
-          <span className={styles.label}>{t('maxBodyChars')}</span>
+          <span className={styles.label}>{t('titleMaxChars')}</span>
           <input
             className={`${styles.input} ${styles.num}`}
             type="number"
             min={1}
-            max={4000}
-            value={bodyCharsDraft.length > 0 ? bodyCharsDraft : settings.maxBodyChars}
-            onChange={(event) => setBodyCharsDraft(event.target.value)}
-            onBlur={saveBodyChars}
+            max={80}
+            value={titleCharsDraft.length > 0 ? titleCharsDraft : settings.titleMaxChars}
+            onChange={(event) => setTitleCharsDraft(event.target.value)}
+            onBlur={saveTitleChars}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') saveBodyChars()
+              if (event.key === 'Enter') saveTitleChars()
             }}
           />
         </div>
+        <div className={styles.row}>
+          <span className={styles.label}>{t('contentMaxChars')}</span>
+          <input
+            className={`${styles.input} ${styles.num}`}
+            type="number"
+            min={1}
+            max={500}
+            value={contentCharsDraft.length > 0 ? contentCharsDraft : settings.contentMaxChars}
+            onChange={(event) => setContentCharsDraft(event.target.value)}
+            onBlur={saveContentChars}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') saveContentChars()
+            }}
+          />
+        </div>
+        <p className={styles.hint}>{t('limitHint')}</p>
         <div className={styles.row}>
           <span className={styles.label}>{t('groupLabel')}</span>
           <input
@@ -195,6 +223,7 @@ export function BarkSettingsSection(props: BarkSettingsSectionProps): ReactEleme
           />
         </div>
         <p className={styles.hint}>{t('groupHint')}</p>
+        <p className={styles.hint}>{t('envHint')}</p>
       </div>
     </div>
   )

@@ -12,7 +12,12 @@
  */
 
 import type { RemoteResult, TypertCodec, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import type { BarkSettings as Settings } from './settings-store.ts'
+import {
+  CONTENT_MAX_CHARS_LIMIT,
+  TITLE_MAX_CHARS_LIMIT,
+  clampCharLimit,
+  type BarkSettings as Settings,
+} from './settings-store.ts'
 
 /** npm package that owns the Remote methods. */
 export const BARK_REMOTE_PACKAGE = 'dsh-notify-bark'
@@ -72,15 +77,16 @@ export function validateSetPatch(patch: unknown): { message?: string; patch?: Ba
     'barkUrl',
     'events',
     'includeAssistantText',
-    'maxBodyChars',
+    'titleMaxChars',
+    'contentMaxChars',
     'group',
   ])
   for (const [key, value] of Object.entries(record)) {
     if (!allowed.has(key)) return { message: `set: unknown field ${key}` }
     if (key === 'enabled' || key === 'includeAssistantText') {
       if (typeof value !== 'boolean') return { message: `set: ${key} must be a boolean` }
-    } else if (key === 'maxBodyChars') {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return { message: 'set: maxBodyChars must be a number' }
+    } else if (key === 'titleMaxChars' || key === 'contentMaxChars') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return { message: `set: ${key} must be a number` }
     } else if (key === 'barkUrl' || key === 'group') {
       if (typeof value !== 'string') return { message: `set: ${key} must be a string` }
     } else if (key === 'events') {
@@ -94,6 +100,12 @@ export function validateSetPatch(patch: unknown): { message?: string; patch?: Ba
   if (trimmed !== undefined) {
     if (trimmed.length > 0) next.barkUrl = trimmed
     else Reflect.deleteProperty(next, 'barkUrl')
+  }
+  if (typeof record.titleMaxChars === 'number') {
+    next.titleMaxChars = clampCharLimit(record.titleMaxChars, TITLE_MAX_CHARS_LIMIT)
+  }
+  if (typeof record.contentMaxChars === 'number') {
+    next.contentMaxChars = clampCharLimit(record.contentMaxChars, CONTENT_MAX_CHARS_LIMIT)
   }
   return { patch: next as BarkSetPatch }
 }

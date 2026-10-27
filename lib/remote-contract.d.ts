@@ -11,7 +11,7 @@
  * @module dsh-notify-bark/remote-contract
  */
 import type { RemoteResult, TypertCodec, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol';
-import type { BarkSettings as Settings } from './settings-store.ts';
+import { type BarkSettings as Settings } from './settings-store.ts';
 /** npm package that owns the Remote methods. */
 export declare const BARK_REMOTE_PACKAGE = "dsh-notify-bark";
 /** Wire namespace of this plugin's Remote surface. */
